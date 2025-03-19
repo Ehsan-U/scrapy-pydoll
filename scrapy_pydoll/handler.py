@@ -11,11 +11,13 @@ from pydoll.browser.page import Page
 from twisted.internet.defer import Deferred, inlineCallbacks
 from scrapy.utils.defer import deferred_from_coro
 from dataclasses import dataclass
-from typing import Self, Optional
+from typing import Dict, Self, Optional
 import logging
 from scrapy.http import Request, Response
 from scrapy.http.headers import Headers
 from scrapy.responsetypes import responsetypes
+from pydoll.events.fetch import FetchEvents
+from pydoll.commands.fetch import FetchCommands
 
 from scrapy_pydoll.page import PageMethod
 from scrapy_pydoll._utils import _encode_body, _maybe_await
@@ -28,12 +30,14 @@ logging.getLogger("pydoll").setLevel(logging.WARNING)
 logging.getLogger("pydoll.connection.connection").setLevel(logging.WARNING)
 
 
+
 @dataclass
 class Config:
     headless: bool
     proxy: str
     max_pages: Optional[int]
     navigation_timeout: Optional[int]
+    pydoll_abort_request: Optional[str]
     target_closed_max_retries: int = 3
 
     @classmethod
@@ -42,7 +46,8 @@ class Config:
             headless=settings.get("PYDOLL_HEADLESS", True),
             proxy=settings.get("PYDOLL_PROXY", None),
             max_pages=settings.getint("PYDOLL_MAX_PAGES", 4),
-            navigation_timeout=settings.getint("PYDOLL_NAVIGATION_TIMEOUT", 60),
+            navigation_timeout=settings.getint("PYDOLL_NAVIGATION_TIMEOUT", 30),
+            pydoll_abort_request=settings.get("PYDOLL_ABORT_REQUEST"),
         )
 
 
@@ -70,6 +75,45 @@ class PydollDownloadHandler(HTTPDownloadHandler):
         return deferred_from_coro(self._launch())
 
 
+    async def interceptor(self, spider: Spider, page: Page, event: Dict) -> None:
+        try:
+            req_id = event['params']['requestId']
+            req_url = event['params']['request']['url']
+            req_method = event['params']['request']['method']
+            await page._execute_command(
+                FetchCommands.fail_request(
+                    request_id=req_id,
+                    error_reason="Aborted"
+                )
+            )
+            logger.debug(
+                "Aborted Pydoll request <%s %s>",
+                req_method.upper(),
+                req_url,
+                extra={
+                    "spider": spider,
+                },
+            )
+            self.stats.inc_value("pydoll/request_count/aborted")
+        except Exception as ex:
+            logger.error(
+                "Failed to abort request: %s exc_type=%s exc_msg=%s",
+                event,
+                type(ex),
+                str(ex),
+                extra={
+                    "spider": spider,
+                    "exception": ex,
+                },
+                exc_info=True,
+            )
+            await page._execute_command(
+                FetchCommands.continue_request(
+                    request_id=req_id,
+                )
+            )
+
+
     async def _launch(self) -> None:
         """Launch browser"""
         logger.info("Starting download handler")
@@ -91,6 +135,10 @@ class PydollDownloadHandler(HTTPDownloadHandler):
     async def _create_page(self, request: Request, spider: Spider) -> Page:
         page_id = await self.browser.new_page()
         page = await self.browser.get_page_by_id(page_id)
+        if self.config.pydoll_abort_request:
+            await page.enable_fetch_events(resource_type=self.config.pydoll_abort_request.title())
+            await page.on(FetchEvents.REQUEST_PAUSED, partial(self.interceptor, spider, page))
+
         _total_page_count = await self._get_total_page_count()
         self.stats.set_value("pydoll/page_count", _total_page_count)
         logger.debug(
