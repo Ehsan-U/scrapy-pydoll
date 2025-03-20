@@ -132,3 +132,8 @@ class QuotesSpider(scrapy.Spider):
 # Supported Pydoll methods
 Refer to the [upstream docs for the `Page` class](https://github.com/autoscrape-labs/pydoll?tab=readme-ov-file#page-interface)
 to see available methods.
+
+
+# Credits
+
+[thalissonvs](https://github.com/thalissonvs) for [Pydoll](https://github.com/autoscrape-labs/pydoll)  <br>
